@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-
+import sys
 import urllib
 from xml.dom import minidom
 import StringIO
@@ -10,10 +10,11 @@ import struct
 import time
 import uuid
 import threading
-import thread
-import sys
-import select
-import netifaces
+#import select
+try:
+    import netifaces
+except ImportError:
+    netifaces = None
 
 
 BUFFER_SIZE = 0xffff
@@ -57,7 +58,9 @@ MATCH_BY_STRCMP = "http://schemas.xmlsoap.org/ws/2005/04/discovery/strcmp0"
 
 def _getNetworkAddrs():
     result = []
-    
+    if netifaces == None:
+        return [socket.gethostbyname(socket.gethostname())]
+        
     for if_name in netifaces.interfaces():
         iface_info = netifaces.ifaddresses(if_name)
         if netifaces.AF_INET in iface_info:
@@ -122,7 +125,7 @@ class URI:
 
 class QName:
 
-    def __init__(self, namespace, localname):        
+    def __init__(self, namespace, localname):
         self._namespace = namespace
         self._localname = localname
 
@@ -429,9 +432,9 @@ def addTypes(doc, node, types):
         envEl = getEnvEl(doc)
         typeList = []
         prefixMap = {}
-        for type in types:
-            ns = type.getNamespace()
-            localname = type.getLocalname()
+        for type_ in types:
+            ns = type_.getNamespace()
+            localname = type_.getLocalname()
             if prefixMap.get(ns) == None:
                 prefix = getRandomStr()
                 prefixMap[ns] = prefix
@@ -839,7 +842,7 @@ class AddressMonitorThread(_StopableDaemonThread):
         self._addrs = addrs
 
     def run(self):
-        while not self._quitEvent.wait(_NETWORK_ADDRESSES_CHECK_TIMEOUT):
+        while not self._quitEvent.is_set() and not self._quitEvent.wait(_NETWORK_ADDRESSES_CHECK_TIMEOUT):
             self._updateAddrs()
 
 
@@ -853,8 +856,7 @@ class NetworkingThread(_StopableDaemonThread):
         self._knownMessageIds = set()
         self._iidMap = {}
         self._observer = observer
-        
-        self._poll = select.poll()
+
 
     @staticmethod
     def _makeMreq(addr):
@@ -892,7 +894,6 @@ class NetworkingThread(_StopableDaemonThread):
         
         sock = self._createMulticastOutSocket(addr)
         self._multiOutUniInSockets[addr] = sock
-        self._poll.register(sock, select.POLLIN)
     
     def removeSourceAddr(self, addr):
         try:
@@ -901,7 +902,6 @@ class NetworkingThread(_StopableDaemonThread):
             pass
 
         sock = self._multiOutUniInSockets[addr]
-        self._poll.unregister(sock)
         sock.close()
         del self._multiOutUniInSockets[addr]
 
@@ -923,12 +923,12 @@ class NetworkingThread(_StopableDaemonThread):
             self._recvMessages()
     
     def _recvMessages(self):
-        for fd, event in self._poll.poll(0):
-            sock = socket.fromfd(fd, socket.AF_INET, socket.SOCK_DGRAM)
-            
+        socks = self._multiOutUniInSockets.values()
+        socks.append(self._multiInSocket)
+        for sock in socks:
             try:
                 data, addr = sock.recvfrom(BUFFER_SIZE)
-            except socket.error, e:
+            except socket.error:
                 time.sleep(0.01)
                 continue
     
@@ -963,7 +963,6 @@ class NetworkingThread(_StopableDaemonThread):
     
     def _sendMsg(self, msg):
         data = createMessage(msg.getEnv())
-
         if msg.msgType() == Message.UNICAST:
             self._uniOutSocket.sendto(data, (msg.getAddr(), msg.getPort()))
         else:
@@ -991,15 +990,13 @@ class NetworkingThread(_StopableDaemonThread):
         self._uniOutSocket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         
         self._multiInSocket = self._createMulticastInSocket()
-        self._poll.register(self._multiInSocket)
         
-        self._multiOutUniInSockets = {}  # FIXME synchronisation
+        self._multiOutUniInSockets = {}  # FIXME synchronization
         
     def join(self):
         super(NetworkingThread, self).join()
         self._uniOutSocket.close()
         
-        self._poll.unregister(self._multiInSocket)
         self._multiInSocket.close()
 
 
@@ -1436,8 +1433,9 @@ class WSDiscovery:
         
         instanceId = _generateInstanceId()
         
-        service = Service(types, scopes, xAddrs, self.uuid, instanceId)
-        self._localServices[self.uuid] = service
+        uuid_ = uuid.uuid4().get_urn()
+        service = Service(types, scopes, xAddrs, uuid_, instanceId)
+        self._localServices[uuid_] = service
         self._sendHello(service)
         
         time.sleep(0.001)
